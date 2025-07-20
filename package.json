@@ -1,9 +1,20 @@
 {
-  "name": "singbox-converter",
-  "version": "0.0.2",
+  "name": "@opexdevelop/singbox-converter",
+  "version": "1.0.0",
   "description": "A module to convert proxy links to Sing-box format and back, based on Nekobox logic.",
   "main": "singbox-converter.js",
   "type": "module",
+  "files": [
+    "singbox-converter.js"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpexDevelop/singbox-converter.git"
+  },
   "author": "t.me/OpexDev",
   "license": "ISC"
 }
