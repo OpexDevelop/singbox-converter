@@ -25,32 +25,32 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # --- Шаг 1: Публикация в npmjs.org ---
-      - name: Setup .npmrc for npmjs.org
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18.x'
-          # Этот шаг создает .npmrc для npmjs.org
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Publish to npmjs.org
-        run: npm publish
-        env:
-          # Этот токен теперь будет правильно использован для registry.npmjs.org
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-
-      # --- Шаг 2: Публикация в GitHub Packages ---
+      # --- Шаг 1: Публикация в GitHub Packages ---
       - name: Setup .npmrc for GitHub Packages
         uses: actions/setup-node@v4
         with:
           node-version: '18.x'
-          # Этот шаг ПЕРЕЗАПИСЫВАЕТ .npmrc для GitHub
+          # Этот шаг настраивает .npmrc для GitHub
           registry-url: 'https://npm.pkg.github.com'
 
       - name: Publish to GitHub Packages
         run: npm publish
         env:
-          # Этот токен теперь будет правильно использован для npm.pkg.github.com
+          # Этот токен будет правильно использован для npm.pkg.github.com
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # --- Шаг 2: Публикация в npmjs.org ---
+      - name: Setup .npmrc for npmjs.org
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          # Этот шаг ПЕРЕЗАПИСЫВАЕТ .npmrc для npmjs.org
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npmjs.org
+        run: npm publish
+        env:
+          # Этот токен будет правильно использован для registry.npmjs.org
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           
