@@ -1,0 +1,49 @@
+# Название воркфлоу
+name: Publish to npm and GitHub Packages
+
+# Триггер для запуска: создание нового релиза
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-and-publish:
+    # Используем последнюю версию Ubuntu
+    runs-on: ubuntu-latest
+    # Даем права на запись пакетов
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. Загружаем код из репозитория
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Настраиваем Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x' # Вы можете указать нужную вам версию Node.js
+          # Указываем, что будем использовать реестр npm по умолчанию для установки зависимостей
+          registry-url: 'https://registry.npmjs.org'
+
+      # 3. Устанавливаем зависимости
+      # Используем 'npm ci' для быстрой и надежной установки из package-lock.json
+      - name: Install dependencies
+        run: npm ci
+
+      # 4. Публикуем в реестр npm
+      - name: Publish to npm
+        run: npm publish
+        env:
+          # Используем секрет NPM_TOKEN для аутентификации
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # 5. Публикуем в реестр GitHub Packages
+      - name: Publish to GitHub Packages
+        run: npm publish --registry=https://npm.pkg.github.com
+        env:
+          # Используем стандартный GITHUB_TOKEN для аутентификации
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
