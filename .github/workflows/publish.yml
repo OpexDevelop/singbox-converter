@@ -1,13 +1,8 @@
-# Название воркфлоу
 name: Publish to npm and GitHub Packages
 
-# Триггеры для запуска
 on:
-  # 1. При создании нового релиза (автоматически)
   release:
     types: [created]
-
-  # 2. Для ручного запуска со страницы Actions
   workflow_dispatch:
 
 jobs:
@@ -21,12 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      # --- Этап 1: Настройка для NPM ---
+      - name: Setup Node.js for npm
         uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           registry-url: 'https://registry.npmjs.org'
-          # Используем кеш для ускорения установки
           cache: 'npm'
 
       - name: Install dependencies
@@ -37,7 +32,17 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # --- Этап 2: Перенастройка для GitHub Packages ---
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          # Указываем на реестр GitHub
+          registry-url: 'https://npm.pkg.github.com'
+
       - name: Publish to GitHub Packages
-        run: npm publish --registry=https://npm.pkg.github.com
+        run: npm publish
         env:
+          # Используем GITHUB_TOKEN, который теперь будет правильно ассоциирован
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
