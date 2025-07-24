@@ -20,7 +20,7 @@ The module supports parsing and generating links for the following protocols:
 ## Installation
 
 ```bash
-npm install @opexdevelop/singbox-converter
+npm install singbox-converter
 ```
 
 ## Usage
@@ -30,7 +30,7 @@ npm install @opexdevelop/singbox-converter
 As this is an ESM package, use the import syntax:
 
 ```javascript
-import { convertLinksToOutbounds, convertOutboundToLink } from '@opexdevelop/singbox-converter';
+import { convertLinksToOutbounds, convertOutboundToLink } from 'singbox-converter';
 ```
 
 ### Quick Start
@@ -38,7 +38,7 @@ import { convertLinksToOutbounds, convertOutboundToLink } from '@opexdevelop/sin
 Here is a simple example of converting a VLESS link to a Sing-box outbound object:
 
 ```javascript
-import { convertLinksToOutbounds } from '@opexdevelop/singbox-converter';
+import { convertLinksToOutbounds } from 'singbox-converter';
 
 const proxyLink = "vless://uuid@example.com:443?encryption=none&security=reality&sni=example.com&fp=chrome&pbk=publicKey&sid=shortId&type=ws&path=/path&host=example.com#My-VLESS-Config";
 
