@@ -3,11 +3,15 @@ import {
     URL,
     URLSearchParams
 } from 'url';
+import yaml from 'js-yaml'; // ЗАВИСИМОСТЬ: `npm install js-yaml` или аналогичная
+
+// --- УТИЛИТЫ ---
 
 function b64Decode(str) {
     try {
         const safeStr = str.replace(/-/g, '+').replace(/_/g, '/');
-        return Buffer.from(safeStr, 'base64').toString('utf8');
+        const padding = '='.repeat((4 - safeStr.length % 4) % 4);
+        return Buffer.from(safeStr + padding, 'base64').toString('utf8');
     } catch (e) {
         return "";
     }
@@ -21,7 +25,6 @@ function b64Encode(str, urlSafe = false) {
     return encoded;
 }
 
-
 function listByLineOrComma(str) {
     if (!str || typeof str !== 'string') return [];
     return str.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
@@ -33,18 +36,44 @@ function safeParseInt(value, defaultValue = 0) {
     return isNaN(parsed) ? defaultValue : parsed;
 }
 
+function isIpAddress(str) {
+    if (!str || typeof str !== 'string') return false;
+    const ipv4Regex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
+    const ipv6Regex = /:/;
+    return ipv4Regex.test(str) || ipv6Regex.test(str);
+}
+
 function genWgReserved(anyStr) {
     try {
-        const numbers = JSON.parse(`[${anyStr.replace(/[\[\]]/g, '')}]`);
-        if (Array.isArray(numbers) && numbers.length === 3 && numbers.every(n => typeof n === 'number')) {
-            const byteArray = new Uint8Array(numbers);
-            return Buffer.from(byteArray).toString('base64');
+        const list = anyStr.replace(/[\[\]\s]/g, '').split(',');
+        if (list.length === 3) {
+            const ba = new Uint8Array(3);
+            for (let i = 0; i < 3; i++) {
+                const num = parseInt(list[i], 10);
+                if (isNaN(num)) return anyStr;
+                ba[i] = num;
+            }
+            return Buffer.from(ba).toString('base64');
         }
         return anyStr;
     } catch (e) {
         return anyStr;
     }
 }
+
+function isMultiPort(portStr) {
+    if (!portStr) return false;
+    return portStr.includes('-') || portStr.includes(',');
+}
+
+function hopPortsToSingboxList(s) {
+    return s.split(',').map(it => {
+        const pRange = it.replace('-', ':');
+        return pRange.includes(':') ? pRange : null;
+    }).filter(Boolean);
+}
+
+// --- КЛАССЫ-ПРЕДСТАВЛЕНИЯ (BEANS) ---
 
 class AbstractBean {
     constructor() {
@@ -92,7 +121,7 @@ class StandardV2RayBean extends AbstractBean {
         this.enableMux = false;
         this.muxPadding = false;
         this.muxType = 0;
-        this.muxConcurrency = 8;
+        this.muxConcurrency = 1;
     }
 
     initializeDefaultValues() {
@@ -117,12 +146,11 @@ class StandardV2RayBean extends AbstractBean {
         if (this.enableMux == null) this.enableMux = false;
         if (this.muxPadding == null) this.muxPadding = false;
         if (this.muxType == null) this.muxType = 0;
-        if (this.muxConcurrency == null) this.muxConcurrency = 8;
+        if (this.muxConcurrency == null) this.muxConcurrency = 1;
     }
 
     isTLS() {
-        return this.security === 'tls' ||
-            this.security === 'reality';
+        return this.security === 'tls' || this.security === 'reality';
     }
 
     toUri(isTrojan = false) {
@@ -167,7 +195,7 @@ class StandardV2RayBean extends AbstractBean {
             }
         }
 
-        if (this.isVLESS() && this.encryption !== 'none') {
+        if (this.isVLESS() && this.encryption && this.encryption !== 'auto') {
             params.set('flow', this.encryption);
         }
 
@@ -199,8 +227,7 @@ class VMessBean extends StandardV2RayBean {
         super.initializeDefaultValues();
         if (this.alterId == null) this.alterId = 0;
         if (this.isVLESS()) {
-            this.encryption = this.encryption ||
-                "none";
+            this.encryption = this.encryption || "";
         } else {
             this.encryption = this.encryption || "auto";
         }
@@ -269,7 +296,7 @@ class ShadowsocksBean extends AbstractBean {
 class SocksBean extends AbstractBean {
     constructor() {
         super();
-        this.protocol = 2;
+        this.protocol = 2; // 0: SOCKS4, 1: SOCKS4a, 2: SOCKS5
         this.username = "";
         this.password = "";
         this.sUoT = false;
@@ -360,8 +387,8 @@ class HysteriaBean extends AbstractBean {
         this.downloadMbps = 0;
         this.allowInsecure = false;
         this.alpn = "";
-        this.protocol = 0;
-        this.authPayloadType = 1;
+        this.protocol = 0; // 0: UDP, 1: FAKETCP, 2: WECHAT_VIDEO
+        this.authPayloadType = 1; // 1: String, 2: Base64
         this.caText = "";
         this.streamReceiveWindow = 0;
         this.connectionReceiveWindow = 0;
@@ -479,6 +506,7 @@ class TuicBean extends AbstractBean {
         if (this.alpn) params.set('alpn', this.alpn);
         if (this.allowInsecure) params.set('allow_insecure', '1');
         if (this.disableSNI) params.set('disable_sni', '1');
+        if (this.reduceRTT) params.set('reduce_rtt', '1');
 
         const queryString = params.toString();
         if (queryString) {
@@ -517,9 +545,13 @@ class WireGuardBean extends AbstractBean {
         const params = new URLSearchParams();
         params.set('public_key', this.peerPublicKey);
         if (this.peerPreSharedKey) params.set('preshared_key', this.peerPreSharedKey);
-        if (this.localAddress) params.set('address', this.localAddress);
+        if (this.localAddress) params.set('address', this.localAddress.split(',')[0]);
         if (this.reserved) params.set('reserved', this.reserved);
-        link += `?${params.toString()}`;
+        if (this.mtu !== 1420) params.set('mtu', this.mtu);
+        const queryString = params.toString();
+        if (queryString) {
+            link += `?${queryString}`;
+        }
         if (this.name) {
             link += `#${encodeURIComponent(this.name)}`;
         }
@@ -532,7 +564,7 @@ class SSHBean extends AbstractBean {
         super();
         this.username = "root";
         this.password = "";
-        this.authType = "password";
+        this.authType = "password"; // "password" or "private_key"
         this.privateKey = "";
         this.privateKeyPassphrase = "";
         this.publicKey = "";
@@ -577,6 +609,8 @@ class SSHBean extends AbstractBean {
     }
 }
 
+// --- ПАРСЕРЫ ССЫЛОК ---
+
 function parseV2RayN(link) {
     const data = b64Decode(link.substring("vmess://".length));
     const vmessQRCode = JSON.parse(data);
@@ -584,8 +618,7 @@ function parseV2RayN(link) {
 
     bean.name = vmessQRCode.ps || "";
     bean.serverAddress = vmessQRCode.add || "";
-    bean.serverPort = parseInt(vmessQRCode.port, 10) ||
-        443;
+    bean.serverPort = parseInt(vmessQRCode.port, 10) || 443;
     bean.uuid = vmessQRCode.id || "";
     bean.alterId = parseInt(vmessQRCode.aid, 10) || 0;
     bean.encryption = vmessQRCode.scy || "auto";
@@ -593,7 +626,7 @@ function parseV2RayN(link) {
     bean.host = vmessQRCode.host || "";
     bean.path = vmessQRCode.path || "";
     if (vmessQRCode.tls === "tls" || vmessQRCode.tls === "reality") {
-        bean.security = vmessQRCode.tls;
+        bean.security = vmessQRCode.tls === "reality" ? "reality" : "tls";
         bean.sni = vmessQRCode.sni || bean.host;
         bean.alpn = vmessQRCode.alpn || "";
         bean.utlsFingerprint = vmessQRCode.fp || "";
@@ -603,7 +636,7 @@ function parseV2RayN(link) {
 
 function parseDuckSoft(url, bean) {
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10);
+    bean.serverPort = parseInt(url.port, 10) || (url.protocol === 'https:' ? 443 : 80);
     bean.name = url.hash ? decodeURIComponent(url.hash.substring(1)) : "";
 
     if (bean instanceof TrojanBean) {
@@ -615,8 +648,7 @@ function parseDuckSoft(url, bean) {
     bean.type = url.searchParams.get("type") || "tcp";
     bean.security = url.searchParams.get("security") || (bean instanceof TrojanBean ? "tls" : "none");
     if (bean.security === "tls" || bean.security === "reality") {
-        bean.allowInsecure = url.searchParams.get("allowInsecure") === "1" ||
-            url.searchParams.get("allowInsecure") === "true";
+        bean.allowInsecure = url.searchParams.get("allowInsecure") === "1" || url.searchParams.get("allowInsecure") === "true";
         bean.sni = url.searchParams.get("sni") || url.searchParams.get("peer") || url.searchParams.get("host") || "";
         bean.alpn = url.searchParams.get("alpn") || "";
         bean.utlsFingerprint = url.searchParams.get("fp") || "";
@@ -629,24 +661,20 @@ function parseDuckSoft(url, bean) {
 
     switch (bean.type) {
         case "ws":
-            bean.host = url.searchParams.get("host") ||
-                "";
+            bean.host = url.searchParams.get("host") || "";
             bean.path = url.searchParams.get("path") || "/";
             break;
         case "http":
-            bean.host = url.searchParams.get("host") ||
-                "";
+            bean.host = url.searchParams.get("host") || "";
             bean.path = url.searchParams.get("path") || "/";
             break;
         case "grpc":
-            bean.path = url.searchParams.get("serviceName") ||
-                "";
+            bean.path = url.searchParams.get("serviceName") || "";
             break;
     }
 
     if (bean instanceof VMessBean && bean.isVLESS()) {
-        bean.encryption = url.searchParams.get("flow") ||
-            "none";
+        bean.encryption = url.searchParams.get("flow") || "";
     }
 
     return bean;
@@ -658,12 +686,11 @@ function parseV2Ray(link) {
         try {
             return parseV2RayN(link);
         } catch (e) {
-            // Fallback
+            // ignore and fallback
         }
     }
 
-    const bean = protocol === 'trojan' ?
-        new TrojanBean() : new VMessBean();
+    const bean = protocol === 'trojan' ? new TrojanBean() : new VMessBean();
     if (protocol === 'vless') {
         bean.alterId = -1;
     }
@@ -678,8 +705,7 @@ function parseShadowsocks(link) {
     const bean = new ShadowsocksBean();
     const hashIndex = link.indexOf('#');
     const uriPart = hashIndex === -1 ? link.substring(5) : link.substring(5, hashIndex);
-    bean.name = hashIndex === -1 ?
-        '' : decodeURIComponent(link.substring(hashIndex + 1));
+    bean.name = hashIndex === -1 ? '' : decodeURIComponent(link.substring(hashIndex + 1));
 
     if (!uriPart.includes('@')) {
         const decoded = b64Decode(uriPart);
@@ -690,16 +716,16 @@ function parseShadowsocks(link) {
         const serverPart = decoded.substring(atIndex + 1);
 
         const [method, password] = credsPart.split(':');
-        const [serverAddress, serverPort] = serverPart.split(':');
+        const [serverAddress, serverPortStr] = serverPart.split(':');
 
         bean.method = method;
         bean.password = password;
         bean.serverAddress = serverAddress;
-        bean.serverPort = parseInt(serverPort, 10);
+        bean.serverPort = parseInt(serverPortStr, 10) || 443;
     } else {
         const url = new URL(`https://${uriPart}`);
         bean.serverAddress = url.hostname;
-        bean.serverPort = parseInt(url.port, 10);
+        bean.serverPort = parseInt(url.port, 10) || 443;
         bean.plugin = url.searchParams.get('plugin') || '';
         if (url.password) {
             bean.method = decodeURIComponent(url.username);
@@ -741,10 +767,21 @@ function parseSocks(link) {
 
     const url = new URL(link.replace(protocol, 'http'));
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10);
+    bean.serverPort = parseInt(url.port, 10) || 1080;
     bean.username = decodeURIComponent(url.username);
     bean.password = decodeURIComponent(url.password);
     bean.name = url.hash ? decodeURIComponent(url.hash.substring(1)) : '';
+
+    if (!bean.password && bean.username) {
+        try {
+            const decoded = b64Decode(bean.username);
+            if (decoded.includes(':')) {
+                [bean.username, bean.password] = decoded.split(':', 2);
+            }
+        } catch (e) {
+            // Ignore error if it's not Base64
+        }
+    }
 
     return bean;
 }
@@ -754,13 +791,11 @@ function parseHttp(link) {
     const url = new URL(link);
     bean.security = url.protocol === 'https:' ? 'tls' : 'none';
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10) ||
-        (bean.isTLS() ? 443 : 80);
+    bean.serverPort = parseInt(url.port, 10) || (bean.isTLS() ? 443 : 80);
     bean.username = decodeURIComponent(url.username);
     bean.password = decodeURIComponent(url.password);
     bean.sni = url.searchParams.get('sni') || '';
-    bean.name = url.hash ?
-        decodeURIComponent(url.hash.substring(1)) : '';
+    bean.name = url.hash ? decodeURIComponent(url.hash.substring(1)) : '';
 
     return bean;
 }
@@ -775,6 +810,7 @@ function parseHysteria1(url) {
     bean.serverPorts = url.searchParams.get("mport") || bean.serverPorts;
     bean.sni = url.searchParams.get("peer") || "";
     bean.authPayload = url.searchParams.get("auth") || "";
+    if (bean.authPayload) bean.authPayloadType = 1;
     bean.allowInsecure = url.searchParams.get("insecure") === "1";
     bean.uploadMbps = safeParseInt(url.searchParams.get("upmbps"), 10);
     bean.downloadMbps = safeParseInt(url.searchParams.get("downmbps"), 50);
@@ -827,7 +863,7 @@ function parseTuic(link) {
     bean.uuid = decodeURIComponent(url.username);
     bean.token = decodeURIComponent(url.password);
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10);
+    bean.serverPort = parseInt(url.port, 10) || 443;
     bean.sni = url.searchParams.get('sni') || '';
     bean.congestionController = url.searchParams.get('congestion_control') || 'cubic';
     bean.udpRelayMode = url.searchParams.get('udp_relay_mode') || 'native';
@@ -845,7 +881,7 @@ function parseWireGuard(link) {
     bean.name = url.hash ? decodeURIComponent(url.hash.substring(1)) : '';
     bean.privateKey = decodeURIComponent(url.username);
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10);
+    bean.serverPort = parseInt(url.port, 10) || 51820;
     bean.peerPublicKey = url.searchParams.get('public_key') || url.searchParams.get('peer_public_key') || '';
     bean.peerPreSharedKey = url.searchParams.get('preshared_key') || '';
     bean.localAddress = url.searchParams.get('address') || '';
@@ -862,10 +898,9 @@ function parseSSH(link) {
 
     bean.name = url.hash ? decodeURIComponent(url.hash.substring(1)) : '';
     bean.serverAddress = url.hostname;
-    bean.serverPort = parseInt(url.port, 10);
+    bean.serverPort = parseInt(url.port, 10) || 22;
     bean.username = decodeURIComponent(url.username);
-    bean.password = decodeURIComponent(url.password) ||
-        url.searchParams.get('password') || '';
+    bean.password = decodeURIComponent(url.password) || url.searchParams.get('password') || '';
 
     bean.privateKey = url.searchParams.get('private_key') || '';
     bean.privateKeyPassphrase = url.searchParams.get('passphrase') || '';
@@ -879,59 +914,365 @@ function parseSSH(link) {
     return bean;
 }
 
+// --- ГЛАВНЫЙ ПАРСЕР ССЫЛОК ---
+
 function parseLink(link) {
     if (!link || typeof link !== 'string') return null;
 
     const protocol = link.split('://')[0].toLowerCase();
     let bean = null;
 
-    switch (protocol) {
-        case 'vmess':
-        case 'vless':
-        case 'trojan':
-            bean = parseV2Ray(link);
-            break;
-        case 'ss':
-            bean = parseShadowsocks(link);
-            break;
-        case 'socks':
-        case 'socks4':
-        case 'socks4a':
-        case 'socks5':
-            bean = parseSocks(link);
-            break;
-        case 'http':
-        case 'https':
-            bean = parseHttp(link);
-            break;
-        case 'hysteria':
-        case 'hy2':
-        case 'hysteria2':
-            bean = parseHysteria(link);
-            break;
-        case 'tuic':
-            bean = parseTuic(link);
-            break;
-        case 'wg':
-            bean = parseWireGuard(link);
-            break;
-        case 'ssh':
-            bean = parseSSH(link);
-            break;
-        default:
-            throw new Error(`Unsupported protocol: ${protocol}`);
+    try {
+        switch (protocol) {
+            case 'vmess':
+            case 'vless':
+            case 'trojan':
+                bean = parseV2Ray(link);
+                break;
+            case 'ss':
+                bean = parseShadowsocks(link);
+                break;
+            case 'socks':
+            case 'socks4':
+            case 'socks4a':
+            case 'socks5':
+                bean = parseSocks(link);
+                break;
+            case 'http':
+            case 'https':
+                bean = parseHttp(link);
+                break;
+            case 'hysteria':
+            case 'hy2':
+            case 'hysteria2':
+                bean = parseHysteria(link);
+                break;
+            case 'tuic':
+                bean = parseTuic(link);
+                break;
+            case 'wg':
+                bean = parseWireGuard(link);
+                break;
+            case 'ssh':
+                bean = parseSSH(link);
+                break;
+            default:
+                return null;
+        }
+    } catch (e) {
+        console.warn(`[!] Failed to parse link "${link}": ${e.message}`);
+        return null;
     }
 
-    bean.initializeDefaultValues();
     return bean;
 }
+
+// --- ПОСТОБРАБОТКА BEAN ---
+
+function postProcessBean(bean, options = {}) {
+    bean.initializeDefaultValues();
+
+    if (bean instanceof StandardV2RayBean) {
+        if (bean.isTLS() && !bean.sni && bean.host && !isIpAddress(bean.host)) {
+            bean.sni = bean.host;
+        }
+    }
+    
+    return bean;
+}
+
+
+// --- ПАРСЕРЫ СЫРЫХ КОНФИГУРАЦИЙ ---
+function parseClashConfig(config, options = {}) {
+    const proxies = [];
+    const globalClientFingerprint = config['global-client-fingerprint'] || '';
+
+    if (!config.proxies || !Array.isArray(config.proxies)) {
+        return proxies;
+    }
+
+    for (const proxy of config.proxies) {
+        let bean = null;
+        try {
+            switch (proxy.type) {
+                case 'socks5':
+                    {
+                        const b = new SocksBean();
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPort = proxy.port;
+                        b.username = proxy.username || '';
+                        b.password = proxy.password || '';
+                        b.protocol = 2; // SOCKS5
+                        bean = b;
+                        break;
+                    }
+                case 'http':
+                    {
+                        const b = new HttpBean();
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPort = proxy.port;
+                        b.username = proxy.username || '';
+                        b.password = proxy.password || '';
+                        if (proxy.tls) {
+                            b.security = 'tls';
+                            b.sni = proxy.sni || '';
+                            b.allowInsecure = proxy['skip-cert-verify'] || false;
+                        }
+                        bean = b;
+                        break;
+                    }
+                case 'ss':
+                    {
+                        const b = new ShadowsocksBean();
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPort = proxy.port;
+                        b.password = proxy.password;
+                        b.method = proxy.cipher === 'dummy' ? 'none' : proxy.cipher;
+                        if (proxy.plugin && proxy['plugin-opts']) {
+                            const opts = proxy['plugin-opts'];
+                            let pluginStr = `${proxy.plugin};`;
+                            pluginStr += Object.entries(opts).map(([k, v]) => `${k}=${v}`).join(';');
+                            b.plugin = pluginStr;
+                        }
+                        bean = b;
+                        break;
+                    }
+                case 'vmess':
+                case 'vless':
+                case 'trojan':
+                    {
+                        const b = proxy.type === 'trojan' ? new TrojanBean() : new VMessBean();
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPort = proxy.port;
+
+                        if (proxy.type === 'vless') {
+                            b.alterId = -1;
+                            b.packetEncoding = 2;
+                            if (String(proxy.flow).includes('xtls-rprx-vision')) {
+                                b.encryption = 'xtls-rprx-vision';
+                            }
+                        }
+                        if (proxy.type === 'trojan') {
+                            b.password = proxy.password;
+                        }
+                        if (proxy.type === 'vmess') {
+                            b.uuid = proxy.uuid;
+                            b.alterId = proxy.alterId;
+                            b.encryption = proxy.cipher;
+                        }
+                        
+                        b.uuid = proxy.uuid || b.uuid;
+                        b.allowInsecure = proxy['skip-cert-verify'] || false;
+                        b.sni = proxy.servername || proxy.sni || '';
+                        b.alpn = (proxy.alpn || []).join(',');
+                        b.utlsFingerprint = proxy['client-fingerprint'] || '';
+
+                        if (proxy.tls) b.security = 'tls';
+                        
+                        if (proxy['reality-opts']) {
+                            b.security = 'reality';
+                            b.realityPubKey = proxy['reality-opts']['public-key'] || '';
+                            b.realityShortId = proxy['reality-opts']['short-id'] || '';
+                        }
+
+                        b.type = proxy.network || 'tcp';
+                        if (b.type === 'h2') b.type = 'http';
+
+                        const wsOpts = proxy['ws-opts'] || {};
+                        if (wsOpts.path) b.path = wsOpts.path;
+                        if (wsOpts.headers && wsOpts.headers.Host) b.host = wsOpts.headers.Host;
+                        
+                        const grpcOpts = proxy['grpc-opts'] || {};
+                        if (grpcOpts['grpc-service-name']) b.path = grpcOpts['grpc-service-name'];
+
+                        bean = b;
+                        break;
+                    }
+                case 'hysteria':
+                    {
+                        const b = new HysteriaBean();
+                        b.protocolVersion = 1;
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPorts = String(proxy.port);
+                        if (proxy.ports) b.serverPorts = String(proxy.ports);
+                        b.uploadMbps = parseInt(String(proxy.up).split(' ')[0], 10) || 10;
+                        b.downloadMbps = parseInt(String(proxy.down).split(' ')[0], 10) || 50;
+                        b.authPayload = proxy['auth_str'] || '';
+                        if (b.authPayload) b.authPayloadType = 1; // String
+                        b.obfuscation = proxy.obfs || '';
+                        b.protocol = proxy.protocol === 'faketcp' ? 1 : 0; // 0: udp, 1: faketcp
+                        b.sni = proxy.sni || '';
+                        b.allowInsecure = proxy['skip-cert-verify'] || false;
+                        b.alpn = (proxy.alpn || []).join(',');
+                        bean = b;
+                        break;
+                    }
+                case 'hysteria2':
+                    {
+                        const b = new HysteriaBean();
+                        b.protocolVersion = 2;
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPorts = String(proxy.port);
+                        if (proxy.ports) b.serverPorts = String(proxy.ports);
+                        b.uploadMbps = parseInt(String(proxy.up).split(' ')[0], 10) || 0;
+                        b.downloadMbps = parseInt(String(proxy.down).split(' ')[0], 10) || 0;
+                        b.authPayload = proxy.password || '';
+                        b.obfuscation = proxy['obfs-password'] || '';
+                        b.sni = proxy.sni || '';
+                        b.allowInsecure = proxy['skip-cert-verify'] || false;
+                        bean = b;
+                        break;
+                    }
+                case 'tuic':
+                    {
+                        const b = new TuicBean();
+                        b.name = proxy.name;
+                        b.serverAddress = proxy.server;
+                        b.serverPort = proxy.port;
+                        b.uuid = proxy.uuid || '';
+                        b.token = proxy.password || '';
+                        if (proxy.token) { // Поддержка старого формата TUIC v4
+                            b.protocolVersion = 4;
+                            b.token = proxy.token;
+                        }
+                        b.sni = proxy.sni || '';
+                        b.alpn = (proxy.alpn || []).join(',');
+                        b.allowInsecure = proxy['skip-cert-verify'] || false;
+                        b.disableSNI = proxy['disable-sni'] || false;
+                        b.congestionController = proxy['congestion-controller'] || 'cubic';
+                        b.udpRelayMode = proxy['udp-relay-mode'] || 'native';
+                        b.reduceRTT = proxy['reduce-rtt'] || false;
+                        
+                        // Логика IP/Server из NekoBox
+                        if (proxy.ip && !isIpAddress(b.serverAddress)) {
+                            b.sni = b.serverAddress;
+                            b.serverAddress = proxy.ip;
+                        }
+                        bean = b;
+                        break;
+                    }
+            }
+            if (bean) {
+                if (bean instanceof StandardV2RayBean && bean.security === 'reality' && !bean.utlsFingerprint && globalClientFingerprint) {
+                    bean.utlsFingerprint = globalClientFingerprint;
+                }
+                proxies.push(bean);
+            }
+        } catch (e) {
+            console.warn(`[!] Failed to parse a proxy from Clash config: ${proxy.name || proxy.server}. Error: ${e.message}`);
+        }
+    }
+    return proxies;
+}
+
+function parseWireGuardConfig(content) {
+    const beans = [];
+    const lines = content.split('\n').map(l => l.trim());
+    
+    let interfaceSection = {};
+    let currentPeer = null;
+    let peers = [];
+
+    let inInterface = false;
+    let inPeer = false;
+
+    for (const line of lines) {
+        if (line.startsWith('[Interface]')) {
+            inInterface = true;
+            inPeer = false;
+            continue;
+        }
+        if (line.startsWith('[Peer]')) {
+            inPeer = true;
+            inInterface = false;
+            if (currentPeer) peers.push(currentPeer);
+            currentPeer = {};
+            continue;
+        }
+        if (!line || line.startsWith('#')) continue;
+
+        const [key, value] = line.split('=').map(s => s.trim());
+        if (inInterface) {
+            if (key === 'Address') {
+                interfaceSection.Address = (interfaceSection.Address || []).concat(value.split(','));
+            } else {
+                interfaceSection[key] = value;
+            }
+        } else if (inPeer && currentPeer) {
+            currentPeer[key] = value;
+        }
+    }
+    if (currentPeer) peers.push(currentPeer);
+
+    if (!interfaceSection.PrivateKey) return [];
+
+    for (const peer of peers) {
+        if (!peer.Endpoint || !peer.PublicKey) continue;
+        const [serverAddress, serverPort] = peer.Endpoint.split(':');
+        
+        const bean = new WireGuardBean();
+        bean.privateKey = interfaceSection.PrivateKey;
+        bean.localAddress = (interfaceSection.Address || []).join(',');
+        bean.mtu = safeParseInt(interfaceSection.MTU, 1420);
+        
+        bean.serverAddress = serverAddress;
+        bean.serverPort = safeParseInt(serverPort);
+        bean.peerPublicKey = peer.PublicKey;
+        bean.peerPreSharedKey = peer.PresharedKey || '';
+        
+        beans.push(bean);
+    }
+
+    return beans;
+}
+
+function parseRawContent(content) {
+    try {
+        if (content.includes('proxies:')) {
+            const config = yaml.load(content);
+            if (config && config.proxies) {
+                return parseClashConfig(config);
+            }
+        }
+    } catch (e) { /* ignore and try next */ }
+
+    try {
+        if (content.includes('[Interface]') && content.includes('[Peer]')) {
+            const beans = parseWireGuardConfig(content);
+            if (beans.length > 0) return beans;
+        }
+    } catch (e) { /* ignore and try next */ }
+
+    try {
+        const decoded = b64Decode(content);
+        const links = decoded.split(/[\n\s]+/).filter(Boolean);
+        if (links.some(l => l.includes('://'))) {
+             return links.map(parseLink).filter(Boolean);
+        }
+    } catch(e) { /* ignore */ }
+
+    const links = content.split(/[\n\s]+/).filter(Boolean);
+    if (links.some(l => l.includes('://'))) {
+        return links.map(parseLink).filter(Boolean);
+    }
+
+    return [];
+}
+
+
+// --- СБОРЩИКИ OUTBOUND'ОВ ---
 
 function buildSingboxMux(bean) {
     if (!bean.enableMux) return undefined;
     return {
         enabled: true,
-        protocol: bean.muxType === 1 ?
-            'h2mux' : 'smux',
+        protocol: bean.muxType === 1 ? 'h2mux' : 'smux',
         max_streams: bean.muxConcurrency,
         padding: bean.muxPadding,
     };
@@ -941,8 +1282,7 @@ function buildSingboxTLS(bean, globalAllowInsecure = false) {
     if (!bean.isTLS()) return undefined;
     const tls = {
         enabled: true,
-        insecure: bean.allowInsecure ||
-            globalAllowInsecure,
+        insecure: bean.allowInsecure || globalAllowInsecure,
     };
 
     if (bean.sni) tls.server_name = bean.sni;
@@ -983,27 +1323,51 @@ function buildSingboxStreamSettings(bean) {
         case "ws":
             const wsSettings = {
                 type: "ws",
-                path: bean.path ||
-                    "/",
                 headers: {},
             };
             if (bean.host) wsSettings.headers.Host = bean.host;
+
+            if (bean.path && bean.path.includes("?ed=")) {
+                wsSettings.path = bean.path.substring(0, bean.path.indexOf("?ed="));
+                wsSettings.max_early_data = parseInt(bean.path.substring(bean.path.indexOf("?ed=") + 4), 10) || 2048;
+                wsSettings.early_data_header_name = "Sec-WebSocket-Protocol";
+            } else {
+                wsSettings.path = bean.path || "/";
+            }
+
             if (bean.wsMaxEarlyData > 0) {
                 wsSettings.max_early_data = bean.wsMaxEarlyData;
-                wsSettings.early_data_header_name = bean.earlyDataHeaderName || 'Sec-WebSocket-Protocol';
+            }
+            if (bean.earlyDataHeaderName) {
+                wsSettings.early_data_header_name = bean.earlyDataHeaderName;
             }
             return wsSettings;
         case "http":
-            return {
+            const httpSettings = {
                 type: "http",
-                host: listByLineOrComma(bean.host),
-                path: bean.path ||
-                    "/",
+                path: bean.path || "/",
             };
+            if (bean.host) {
+                httpSettings.host = listByLineOrComma(bean.host);
+            }
+            if (!bean.isTLS()) {
+                httpSettings.method = "GET";
+            }
+            return httpSettings;
         case "grpc":
             return {
                 type: "grpc",
                 service_name: bean.path,
+            };
+        case "quic":
+            return {
+                type: "quic",
+            };
+        case "httpupgrade":
+            return {
+                type: "httpupgrade",
+                host: bean.host,
+                path: bean.path,
             };
         default:
             return undefined;
@@ -1020,20 +1384,28 @@ function buildSingboxVMess(bean, options) {
         tls: buildSingboxTLS(bean, options.globalAllowInsecure),
         transport: buildSingboxStreamSettings(bean),
     };
+
+    let packetEncodingStr = "";
+    if (bean.packetEncoding === 1) packetEncodingStr = "packetaddr";
+    if (bean.packetEncoding === 2) packetEncodingStr = "xudp";
+
     if (bean.isVLESS()) {
-        return {
+        const vlessOutbound = {
             ...base,
             type: 'vless',
-            flow: bean.encryption ||
-                'none',
+            packet_encoding: packetEncodingStr || undefined,
         };
+        if (bean.encryption && bean.encryption !== "auto") {
+            vlessOutbound.flow = bean.encryption;
+        }
+        return vlessOutbound;
     } else {
         return {
             ...base,
             type: 'vmess',
             alter_id: bean.alterId,
-            security: bean.encryption ||
-                'auto',
+            security: bean.encryption || 'auto',
+            packet_encoding: packetEncodingStr || undefined,
         };
     }
 }
@@ -1065,20 +1437,26 @@ function buildSingboxShadowsocks(bean) {
         outbound.plugin = parts[0];
         outbound.plugin_opts = parts.slice(1).join(';');
     }
+    if (bean.sUoT) {
+        outbound.udp_over_tcp = true;
+    }
     return outbound;
 }
 
 function buildSingboxSocks(bean) {
-    return {
+    const outbound = {
         tag: bean.displayName(),
         type: 'socks',
         server: bean.serverAddress,
         server_port: bean.serverPort,
         version: bean.protocolVersionName(),
-        username: bean.username ||
-            undefined,
+        username: bean.username || undefined,
         password: bean.password || undefined,
     };
+    if (bean.sUoT) {
+        outbound.udp_over_tcp = true;
+    }
+    return outbound;
 }
 
 function buildSingboxHttp(bean, options) {
@@ -1087,10 +1465,8 @@ function buildSingboxHttp(bean, options) {
         type: 'http',
         server: bean.serverAddress,
         server_port: bean.serverPort,
-        username: bean.username ||
-            undefined,
-        password: bean.password ||
-            undefined,
+        username: bean.username || undefined,
+        password: bean.password || undefined,
         tls: buildSingboxTLS(bean, options.globalAllowInsecure),
     };
 }
@@ -1098,53 +1474,65 @@ function buildSingboxHttp(bean, options) {
 function buildSingboxHysteria(bean, options) {
     const tls = {
         enabled: true,
-        insecure: bean.allowInsecure ||
-            options.globalAllowInsecure,
-        server_name: bean.sni,
-        certificate: bean.caText ||
-            undefined,
+        insecure: bean.allowInsecure || options.globalAllowInsecure,
+        server_name: bean.sni || undefined,
+        certificate: bean.caText || undefined,
     };
 
     if (bean.protocolVersion === 1) {
         if (bean.alpn) tls.alpn = listByLineOrComma(bean.alpn);
-        return {
+        const outbound = {
             tag: bean.displayName(),
             type: 'hysteria',
             server: bean.serverAddress,
-            server_port: safeParseInt(bean.serverPorts),
             up_mbps: bean.uploadMbps,
             down_mbps: bean.downloadMbps,
-            obfs: bean.obfuscation ||
-                undefined,
-            auth_str: bean.authPayloadType === 1 ?
-                bean.authPayload : undefined,
-            auth: bean.authPayloadType === 2 ?
-                bean.authPayload : undefined,
+            obfs: bean.obfuscation || undefined,
+            auth_str: bean.authPayloadType === 1 ? bean.authPayload : undefined,
+            auth: bean.authPayloadType === 2 ? bean.authPayload : undefined,
+            hop_interval: `${bean.hopInterval}s`,
+            disable_mtu_discovery: bean.disableMtuDiscovery,
             tls: tls,
         };
+        if (isMultiPort(bean.serverPorts)) {
+            outbound.server_ports = hopPortsToSingboxList(bean.serverPorts);
+        } else {
+            outbound.server_port = safeParseInt(bean.serverPorts);
+        }
+        if (bean.streamReceiveWindow > 0) {
+            outbound.recv_window_conn = bean.streamReceiveWindow;
+        }
+        if (bean.connectionReceiveWindow > 0) {
+            outbound.recv_window = bean.connectionReceiveWindow;
+        }
+        return outbound;
     } else {
         tls.alpn = ['h3'];
         const obfs = bean.obfuscation ? {
             type: 'salamander',
             password: bean.obfuscation
         } : undefined;
-        return {
+        const outbound = {
             tag: bean.displayName(),
             type: 'hysteria2',
             server: bean.serverAddress,
-            server_port: safeParseInt(bean.serverPorts),
             up_mbps: bean.uploadMbps,
             down_mbps: bean.downloadMbps,
             password: bean.authPayload,
-
             obfs: obfs,
             tls: tls,
         };
+        if (isMultiPort(bean.serverPorts)) {
+            outbound.server_ports = hopPortsToSingboxList(bean.serverPorts);
+        } else {
+            outbound.server_port = safeParseInt(bean.serverPorts);
+        }
+        return outbound;
     }
 }
 
 function buildSingboxTuic(bean, options) {
-    return {
+    const outbound = {
         tag: bean.displayName(),
         type: 'tuic',
         server: bean.serverAddress,
@@ -1152,24 +1540,24 @@ function buildSingboxTuic(bean, options) {
         uuid: bean.uuid,
         password: bean.token,
         congestion_control: bean.congestionController,
-        udp_relay_mode: bean.udpRelayMode,
         zero_rtt_handshake: bean.reduceRTT,
         tls: {
-
             enabled: true,
-            insecure: bean.allowInsecure ||
-                options.globalAllowInsecure,
-            server_name: bean.sni,
+            insecure: bean.allowInsecure || options.globalAllowInsecure,
+            server_name: bean.sni || undefined,
             alpn: listByLineOrComma(bean.alpn),
             disable_sni: bean.disableSNI,
-            certificate: bean.caText ||
-                undefined,
+            certificate: bean.caText || undefined,
         }
     };
+    if (bean.udpRelayMode === 'quic') {
+        outbound.udp_relay_mode = 'quic';
+    }
+    return outbound;
 }
 
 function buildSingboxWireguard(bean) {
-    return {
+    const outbound = {
         tag: bean.displayName(),
         type: 'wireguard',
         server: bean.serverAddress,
@@ -1177,12 +1565,15 @@ function buildSingboxWireguard(bean) {
         local_address: listByLineOrComma(bean.localAddress),
         private_key: bean.privateKey,
         peer_public_key: bean.peerPublicKey,
-        pre_shared_key: bean.peerPreSharedKey ||
-            undefined,
         mtu: bean.mtu,
-        reserved: bean.reserved ?
-            genWgReserved(bean.reserved) : undefined,
     };
+    if (bean.peerPreSharedKey) {
+        outbound.pre_shared_key = bean.peerPreSharedKey;
+    }
+    if (bean.reserved) {
+        outbound.reserved = genWgReserved(bean.reserved);
+    }
+    return outbound;
 }
 
 function buildSingboxSSH(bean) {
@@ -1192,20 +1583,18 @@ function buildSingboxSSH(bean) {
         server: bean.serverAddress,
         server_port: bean.serverPort,
         user: bean.username,
-        host_key: bean.publicKey ?
-            listByLineOrComma(bean.publicKey) : undefined,
     };
-
+    if (bean.publicKey) {
+        outbound.host_key = listByLineOrComma(bean.publicKey);
+    }
     if (bean.authType === 'private_key') {
         outbound.private_key = bean.privateKey;
         outbound.private_key_passphrase = bean.privateKeyPassphrase || undefined;
     } else {
         outbound.password = bean.password;
     }
-
     return outbound;
 }
-
 
 function buildSingboxOutbound(bean, options) {
     if (bean instanceof VMessBean) return buildSingboxVMess(bean, options);
@@ -1219,6 +1608,49 @@ function buildSingboxOutbound(bean, options) {
     if (bean instanceof SSHBean) return buildSingboxSSH(bean, options);
     throw new Error(`Unsupported bean type for Sing-box conversion: ${bean.constructor.name}`);
 }
+
+// --- ГЛАВНАЯ ЭКСПОРТИРУЕМАЯ ФУНКЦИЯ ---
+
+export async function convertToOutbounds(input, options = {}) {
+    let beans = [];
+
+    const lines = input.trim().split('\n');
+    const isLikelyLinks = lines.every(line => line.trim().includes('://') || line.trim() === '');
+
+    if (isLikelyLinks && !input.includes('proxies:') && !input.includes('[Interface]')) {
+        const links = input.split(/[\n\s]+/).filter(Boolean);
+        beans = links.map(parseLink).filter(Boolean);
+    } else {
+        beans = parseRawContent(input);
+    }
+
+    const outbounds = [];
+    for (let bean of beans) {
+        try {
+            bean = postProcessBean(bean, options);
+            const singboxOutbound = buildSingboxOutbound(bean, options);
+            outbounds.push(singboxOutbound);
+        } catch (e) {
+            console.warn(`[!] Failed to build outbound for bean "${bean.displayName()}": ${e.message}`);
+        }
+    }
+
+    if (options.outputPath) {
+        const jsonString = JSON.stringify({
+            outbounds
+        }, null, options.pretty !== false ? 2 : 0);
+        await fs.writeFile(options.outputPath, jsonString, 'utf-8');
+        console.log(`✅ Sing-box configuration saved to ${options.outputPath}`);
+        return;
+    }
+
+    return outbounds;
+}
+
+
+// PASTE THIS CODE BLOCK BEFORE `export async function convertToOutbounds(...)`
+
+// --- ОБРАТНЫЕ ПАРСЕРЫ (OUTBOUND -> BEAN) ---
 
 function parseSingboxTLS(outbound, bean) {
     if (!outbound.tls || !outbound.tls.enabled) return;
@@ -1268,7 +1700,7 @@ function parseSingboxVMess(outbound) {
 
     if (outbound.type === 'vless') {
         bean.alterId = -1;
-        bean.encryption = outbound.flow || 'none';
+        bean.encryption = outbound.flow || '';
     } else {
         bean.alterId = outbound.alter_id;
         bean.encryption = outbound.security || 'auto';
@@ -1473,50 +1905,9 @@ function parseSingboxOutbound(outbound) {
 }
 
 /**
- * @typedef {Object} ConversionOptions
- * @property {string} [outputPath] - If specified, the result will be saved to this file.
- * @property {boolean} [pretty=true] - Whether to format the output JSON.
- * @property {boolean} [globalAllowInsecure=false] - Apply allowInsecure to all TLS configurations.
- */
-
-/**
- * Converts one or more links into an array of Sing-box outbound objects.
- * @param {string|string[]} links - A single link, multiple links separated by spaces/newlines, or an array of links.
- * @param {ConversionOptions} [options={}] - Conversion options.
- * @returns {Promise<Object[]|undefined>} - An array of outbound objects, or undefined if the result is saved to a file.
- */
-export async function convertLinksToOutbounds(links, options = {}) {
-    const linkArray = Array.isArray(links) ? links : links.split(/\s+/).filter(Boolean);
-    const outbounds = [];
-
-    for (const link of linkArray) {
-        try {
-            const bean = parseLink(link);
-            if (bean) {
-                const singboxOutbound = buildSingboxOutbound(bean, options);
-                outbounds.push(singboxOutbound);
-            }
-        } catch (e) {
-            console.warn(`[!] Failed to parse link "${link}": ${e.message}`);
-        }
-    }
-
-    if (options.outputPath) {
-        const jsonString = JSON.stringify({
-            outbounds
-        }, null, options.pretty !== false ? 2 : 0);
-        await fs.writeFile(options.outputPath, jsonString, 'utf-8');
-        console.log(`✅ Sing-box configuration saved to ${options.outputPath}`);
-        return;
-    }
-
-    return outbounds;
-}
-
-/**
- * Converts a single outbound object from a Sing-box configuration into its corresponding link.
- * @param {Object} outbound - An outbound object from the Sing-box JSON configuration.
- * @returns {string} - The proxy link.
+ * Конвертирует один outbound-объект Sing-box в ссылку.
+ * @param {object} outbound - Outbound-объект из конфигурации Sing-box.
+ * @returns {string} - Ссылка на прокси.
  */
 export function convertOutboundToLink(outbound) {
     try {
@@ -1531,3 +1922,14 @@ export function convertOutboundToLink(outbound) {
     }
 }
 
+/**
+ * Конвертирует массив outbound-объектов Sing-box в массив ссылок.
+ * @param {object[]} outbounds - Массив outbound-объектов.
+ * @returns {string[]} - Массив ссылок.
+ */
+export function convertOutboundsToLinks(outbounds) {
+    if (!Array.isArray(outbounds)) {
+        throw new Error("Input must be an array of outbound objects.");
+    }
+    return outbounds.map(outbound => convertOutboundToLink(outbound));
+}
