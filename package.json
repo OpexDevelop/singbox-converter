@@ -13,5 +13,8 @@
     "url": "git+https://github.com/OpexDevelop/singbox-converter.git"
   },
   "author": "t.me/OpexDev",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
 }
