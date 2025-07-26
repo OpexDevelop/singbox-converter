@@ -1,95 +1,158 @@
 # Sing-box Converter
 
-This is a Node.js (ESM) module to convert proxy links to the Sing-box JSON configuration format and back. It is based on the logic from Nekobox.
+Это модуль Node.js (ESM) для преобразования прокси-ссылок и файлов конфигурации в формат JSON Sing-box и обратно. Он основан на логике из Nekobox.
 
-## Supported Protocols
+## Поддерживаемые протоколы
 
-The module supports parsing and generating links for the following protocols:
+Модуль поддерживает парсинг и генерацию ссылок для следующих протоколов:
 
-* VMess
-* VLESS
-* Trojan
-* Shadowsocks (ss)
-* Socks (socks, socks4, socks4a, socks5)
-* HTTP/HTTPS
-* Hysteria / Hysteria2 (hy2)
-* TUIC
-* WireGuard (wg)
-* SSH
+*   VMess
+*   VLESS
+*   Trojan
+*   Shadowsocks (ss)
+*   Socks (socks, socks4, socks4a, socks5)
+*   HTTP/HTTPS
+*   Hysteria / Hysteria2 (hy2)
+*   TUIC
+*   WireGuard (wg)
+*   SSH
 
-## Installation
+## Поддерживаемые форматы ввода
+
+Функция `convertToOutbounds` может автоматически определять и обрабатывать следующие форматы ввода:
+
+*   **Отдельные прокси-ссылки**: Например, `vless://...`
+*   **Ссылки, разделенные пробелами или новыми строками**: Текстовый блок, содержащий несколько ссылок.
+*   **Список ссылок в кодировке Base64**: Одна строка Base64, которая декодируется в список ссылок.
+*   **Конфигурация Clash (YAML)**: Полный или частичный файл конфигурации в формате YAML, содержащий раздел `proxies`.
+*   **Конфигурация WireGuard (.conf)**: Стандартный формат файла конфигурации `[Interface]` и `[Peer]`.
+
+## Установка
 
 ```bash
 npm install singbox-converter
 ```
 
-## Usage
+## Использование
 
-### Importing the Module
+### Импорт модуля
 
-As this is an ESM package, use the import syntax:
+Поскольку это пакет ESM, используйте синтаксис `import`:
 
 ```javascript
-import { convertLinksToOutbounds, convertOutboundToLink } from 'singbox-converter';
+import {
+    convertToOutbounds,
+    convertOutboundsToLinks,
+    convertOutboundToLink
+} from 'singbox-converter';
 ```
 
-### Quick Start
+### Быстрый старт
 
-Here is a simple example of converting a VLESS link to a Sing-box outbound object:
+**Пример 1: Преобразование ссылки VLESS в объект outbound Sing-box**
 
 ```javascript
-import { convertLinksToOutbounds } from 'singbox-converter';
+import { convertToOutbounds } from 'singbox-converter';
 
 const proxyLink = "vless://uuid@example.com:443?encryption=none&security=reality&sni=example.com&fp=chrome&pbk=publicKey&sid=shortId&type=ws&path=/path&host=example.com#My-VLESS-Config";
 
 async function run() {
-    const outbounds = await convertLinksToOutbounds(proxyLink);
+    const outbounds = await convertToOutbounds(proxyLink);
     console.log(JSON.stringify(outbounds, null, 2));
 }
 
 run();
 ```
 
+**Пример 2: Преобразование объекта outbound Sing-box обратно в ссылку**
+
+```javascript
+import { convertOutboundToLink } from 'singbox-converter';
+
+const singboxOutbound = {
+  "tag": "My-VLESS-Config",
+  "server": "example.com",
+  "server_port": 443,
+  "uuid": "uuid",
+  "type": "vless",
+  "tls": {
+    "enabled": true,
+    "insecure": false,
+    "server_name": "example.com",
+    "reality": {
+      "enabled": true,
+      "public_key": "publicKey",
+      "short_id": "shortId"
+    },
+    "utls": {
+      "enabled": true,
+      "fingerprint": "chrome"
+    }
+  },
+  "transport": {
+    "type": "ws",
+    "path": "/path",
+    "headers": {
+      "Host": "example.com"
+    }
+  }
+};
+
+const link = convertOutboundToLink(singboxOutbound);
+console.log(link); // vless://uuid@example.com:443?type=ws&security=reality&sni=example.com&fp=chrome&pbk=publicKey&sid=shortId&path=%2Fpath&host=example.com#My-VLESS-Config
+```
+
 ## API
 
-### convertLinksToOutbounds(links, [options])
+### `convertToOutbounds(input, [options])`
 
-An asynchronous function that converts one or more proxy links into an array of outbound objects for a Sing-box configuration.
+Асинхронная функция, которая преобразует один или несколько прокси-серверов (из ссылок или файла конфигурации) в массив объектов outbound для конфигурации Sing-box.
 
-**Parameters:**
+**Параметры:**
 
-* `links`: `string | string[]`
-  
-  Can be one of the following:
-  * A single link as a string.
-  * A string containing multiple links separated by spaces or newlines.
-  * An array of strings, where each string is a single proxy link.
+*   `input`: `string`
+    Может быть одним из следующих:
+    *   Одна ссылка в виде строки.
+    *   Строка, содержащая несколько ссылок, разделенных пробелами или новыми строками.
+    *   Строка, содержащая список ссылок в кодировке Base64.
+    *   Строка, содержащая полную конфигурацию в формате Clash (YAML) или WireGuard (.conf).
 
-* `options` (optional): `object`
-  
-  An object with conversion options:
-  * `outputPath`: `string` - If specified, the result will be saved to a file at this path, and the function will return undefined.
-  * `pretty`: `boolean` - (default true) Whether to format the output JSON with indentation.
-  * `globalAllowInsecure`: `boolean` - (default false) Apply insecure: true to all TLS configurations where applicable.
+*   `options` (необязательный): `object`
+    Объект с опциями преобразования:
+    *   `outputPath`: `string` - Если указано, результат будет сохранен в файл по этому пути, и функция вернет `undefined`.
+    *   `pretty`: `boolean` - (по умолчанию `true`) Форматировать ли выходной JSON с отступами.
+    *   `globalAllowInsecure`: `boolean` - (по умолчанию `false`) Применить `insecure: true` ко всем конфигурациям TLS, где это применимо.
 
-**Returns:** `Promise<Object[] | undefined>`
+**Возвращает:** `Promise<Object[] | undefined>`
 
-Returns a promise that resolves to an array of Sing-box outbound objects. If the outputPath option was used, the promise will resolve to undefined.
+Возвращает промис, который разрешается в массив объектов outbound Sing-box. Если была использована опция `outputPath`, промис разрешится в `undefined`.
 
-### convertOutboundToLink(outbound)
+### `convertOutboundToLink(outbound)`
 
-A synchronous function that converts a single outbound object from a Sing-box configuration back into its corresponding proxy link format.
+Синхронная функция, которая преобразует один объект outbound из конфигурации Sing-box обратно в соответствующий формат прокси-ссылки.
 
-**Parameters:**
+**Параметры:**
 
-* `outbound`: `object`
-  
-  A single valid outbound object from a Sing-box JSON configuration.
+*   `outbound`: `object`
+    Один действительный объект outbound из JSON-конфигурации Sing-box.
 
-**Returns:** `string`
+**Возвращает:** `string`
 
-The corresponding proxy link as a string. In case of a conversion error, it will return a link in the format `error://conversion-failed?message=...`.
+Соответствующая прокси-ссылка в виде строки. В случае ошибки преобразования вернет ссылку в формате `error://conversion-failed?message=...`.
 
-## Author
+### `convertOutboundsToLinks(outbounds)`
 
-Developed by [OpexDev](https://t.me/OpexDev)
+Синхронная функция, которая преобразует массив объектов outbound Sing-box в массив ссылок.
+
+**Параметры:**
+
+*   `outbounds`: `object[]`
+    Массив объектов outbound.
+
+**Возвращает:** `string[]`
+
+Массив прокси-ссылок.
+
+## Автор
+
+Разработано [OpexDev](https://t.me/OpexDev)
